@@ -1,0 +1,444 @@
+# CPSC 392 Final Project – EV Population Analyses
+# Gabi Soma & Morgan Peecher
+
+# =========================
+# 0. Imports & Setup
+# =========================
+import pandas as pd
+import numpy as np
+
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler, OneHotEncoder
+from sklearn.compose import ColumnTransformer
+from sklearn.pipeline import Pipeline
+
+from sklearn.linear_model import LinearRegression, Lasso, LogisticRegression
+from sklearn.ensemble import RandomForestRegressor, RandomForestClassifier
+from sklearn.cluster import KMeans
+from sklearn.mixture import GaussianMixture
+from sklearn.decomposition import PCA
+
+from sklearn.metrics import (
+    mean_squared_error, mean_absolute_error, r2_score,
+    accuracy_score, precision_score, recall_score, f1_score, roc_auc_score,
+    confusion_matrix, classification_report
+)
+
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+# For "ggplot-like" style
+plt.style.use("ggplot")
+
+# =========================
+# 1. Load Data
+# =========================
+df = pd.read_csv("Electric_Vehicle_Population_Data.csv")
+
+# Quick standardization of column names (optional but helpful)
+df.columns = [c.strip().lower().replace(" ", "_") for c in df.columns]
+
+# Example expected columns (adjust if names differ slightly in your CSV):
+# 'make', 'model_year', 'electric_vehicle_type', 'base_msrp',
+# 'electric_range', 'electric_utility', 'cafv_eligibility',
+# 'county', 'city', 'state', 'postal_code', 'vin_1_10', ...
+
+# =========================
+# 2. Question 1 – LASSO vs OLS for Electric Range
+# =========================
+# Target: electric_range
+# Predictors: make, model_year, electric_vehicle_type, base_msrp, electric_utility, cafv_eligibility
+
+q1_cols = [
+    "make", "model_year", "electric_vehicle_type",
+    "base_msrp", "electric_range", "electric_utility", "cafv_eligibility"
+]
+q1_df = df[q1_cols].copy()
+
+# Cleaning: drop missing, filter electric_range > 0
+q1_df = q1_df.dropna(subset=q1_cols)
+q1_df = q1_df[q1_df["electric_range"] > 0]
+
+X_q1 = q1_df.drop("electric_range", axis=1)
+y_q1 = q1_df["electric_range"]
+
+# Identify numeric and categorical columns
+num_features_q1 = ["model_year", "base_msrp"]
+cat_features_q1 = ["make", "electric_vehicle_type", "electric_utility", "cafv_eligibility"]
+
+numeric_transformer = StandardScaler()
+categorical_transformer = OneHotEncoder(handle_unknown="ignore")
+
+preprocessor_q1 = ColumnTransformer(
+    transformers=[
+        ("num", numeric_transformer, num_features_q1),
+        ("cat", categorical_transformer, cat_features_q1),
+    ]
+)
+
+# Train/test split
+X_train_q1, X_test_q1, y_train_q1, y_test_q1 = train_test_split(
+    X_q1, y_q1, test_size=0.2, random_state=42
+)
+
+# ----- OLS Linear Regression -----
+ols_q1 = Pipeline(steps=[
+    ("preprocess", preprocessor_q1),
+    ("model", LinearRegression())
+])
+
+ols_q1.fit(X_train_q1, y_train_q1)
+y_pred_ols_q1 = ols_q1.predict(X_test_q1)
+
+mse_ols_q1 = mean_squared_error(y_test_q1, y_pred_ols_q1)
+mae_ols_q1 = mean_absolute_error(y_test_q1, y_pred_ols_q1)
+r2_ols_q1 = r2_score(y_test_q1, y_pred_ols_q1)
+
+print("Q1 – OLS Linear Regression")
+print("MSE:", mse_ols_q1)
+print("MAE:", mae_ols_q1)
+print("R²:", r2_ols_q1)
+
+# ----- LASSO Regression -----
+lasso_q1 = Pipeline(steps=[
+    ("preprocess", preprocessor_q1),
+    ("model", Lasso(alpha=0.1, max_iter=10000, random_state=42))
+])
+
+lasso_q1.fit(X_train_q1, y_train_q1)
+y_pred_lasso_q1 = lasso_q1.predict(X_test_q1)
+
+mse_lasso_q1 = mean_squared_error(y_test_q1, y_pred_lasso_q1)
+mae_lasso_q1 = mean_absolute_error(y_test_q1, y_pred_lasso_q1)
+r2_lasso_q1 = r2_score(y_test_q1, y_pred_lasso_q1)
+
+print("\nQ1 – LASSO Regression")
+print("MSE:", mse_lasso_q1)
+print("MAE:", mae_lasso_q1)
+print("R²:", r2_lasso_q1)
+
+# ----- Extract LASSO Coefficients for Plot -----
+# Fit preprocessor separately to get feature names
+preprocessor_q1.fit(X_train_q1)
+X_train_q1_trans = preprocessor_q1.transform(X_train_q1)
+
+lasso_raw = Lasso(alpha=0.1, max_iter=10000, random_state=42)
+lasso_raw.fit(X_train_q1_trans, y_train_q1)
+
+# Get feature names
+num_names = num_features_q1
+cat_names = preprocessor_q1.named_transformers_["cat"].get_feature_names_out(cat_features_q1)
+feature_names_q1 = np.concatenate([num_names, cat_names])
+
+coef_q1 = pd.Series(lasso_raw.coef_, index=feature_names_q1)
+nonzero_coef_q1 = coef_q1[coef_q1 != 0].sort_values()
+
+plt.figure(figsize=(8, 6))
+nonzero_coef_q1.plot(kind="barh")
+plt.title("Q1 – LASSO Non-zero Coefficients for Electric Range")
+plt.xlabel("Coefficient")
+plt.tight_layout()
+plt.show()
+
+# =========================
+# 3. Question 2 – Clustering + PCA (Luxury vs Utility Personas)
+# =========================
+# Variables: model_year, electric_range, base_msrp, electric_utility, cafv_eligibility, county
+
+q2_cols = ["model_year", "electric_range", "base_msrp", "electric_utility", "cafv_eligibility", "county"]
+q2_df = df[q2_cols].copy()
+q2_df = q2_df.dropna(subset=q2_cols)
+q2_df = q2_df[q2_df["electric_range"] > 0]
+q2_df = q2_df[q2_df["base_msrp"] > 0]
+
+# For clustering, use numeric features (standardized)
+X_q2_num = q2_df[["model_year", "electric_range", "base_msrp"]].copy()
+
+scaler_q2 = StandardScaler()
+X_q2_scaled = scaler_q2.fit_transform(X_q2_num)
+
+# ----- K-Means Clustering -----
+kmeans_q2 = KMeans(n_clusters=3, random_state=42, n_init=10)
+q2_df["cluster_kmeans"] = kmeans_q2.fit_predict(X_q2_scaled)
+
+# ----- PCA for Visualization -----
+pca_q2 = PCA(n_components=2, random_state=42)
+X_q2_pca = pca_q2.fit_transform(X_q2_scaled)
+q2_df["pc1"] = X_q2_pca[:, 0]
+q2_df["pc2"] = X_q2_pca[:, 1]
+
+plt.figure(figsize=(8, 6))
+sns.scatterplot(
+    data=q2_df.sample(min(5000, len(q2_df)), random_state=42),
+    x="pc1", y="pc2", hue="cluster_kmeans", palette="Set1", alpha=0.7
+)
+plt.title("Q2 – PCA Projection of K-Means Clusters")
+plt.xlabel("PC1")
+plt.ylabel("PC2")
+plt.legend(title="Cluster")
+plt.tight_layout()
+plt.show()
+
+# ----- Boxplots: Luxury vs Utility Personas -----
+plt.figure(figsize=(8, 6))
+sns.boxplot(data=q2_df, x="cluster_kmeans", y="base_msrp")
+plt.title("Q2 – Base MSRP by Cluster (Luxury vs Utility Personas)")
+plt.xlabel("Cluster")
+plt.ylabel("Base MSRP")
+plt.tight_layout()
+plt.show()
+
+plt.figure(figsize=(8, 6))
+sns.boxplot(data=q2_df, x="cluster_kmeans", y="electric_range")
+plt.title("Q2 – Electric Range by Cluster")
+plt.xlabel("Cluster")
+plt.ylabel("Electric Range (miles)")
+plt.tight_layout()
+plt.show()
+
+# ----- Cluster Distribution by Electric Utility -----
+cluster_utility_counts = (
+    q2_df.groupby(["electric_utility", "cluster_kmeans"])
+    .size()
+    .reset_index(name="count")
+)
+
+plt.figure(figsize=(10, 6))
+sns.barplot(
+    data=cluster_utility_counts,
+    x="electric_utility", y="count", hue="cluster_kmeans"
+)
+plt.title("Q2 – Cluster Distribution by Electric Utility")
+plt.xticks(rotation=90)
+plt.xlabel("Electric Utility")
+plt.ylabel("Number of Vehicles")
+plt.tight_layout()
+plt.show()
+
+# (Optional) GMM for soft clustering
+gmm_q2 = GaussianMixture(n_components=3, random_state=42)
+q2_df["cluster_gmm"] = gmm_q2.fit_predict(X_q2_scaled)
+
+# =========================
+# 4. Question 3 – Classifying BEV vs PHEV
+# =========================
+# Target: electric_vehicle_type (BEV vs PHEV)
+# Predictors: model_year, base_msrp, electric_range, geographic_location (county/state),
+#             cafv_eligibility, manufacturer, electric_utility
+
+q3_cols = [
+    "electric_vehicle_type", "model_year", "base_msrp", "electric_range",
+    "county", "state", "cafv_eligibility", "make", "electric_utility"
+]
+q3_df = df[q3_cols].copy()
+q3_df = q3_df.dropna(subset=q3_cols)
+q3_df = q3_df[q3_df["electric_vehicle_type"].isin(["Battery Electric Vehicle (BEV)", "Plug-in Hybrid Electric Vehicle (PHEV)"])]
+
+X_q3 = q3_df.drop("electric_vehicle_type", axis=1)
+y_q3 = q3_df["electric_vehicle_type"].replace({
+    "Battery Electric Vehicle (BEV)": 1,
+    "Plug-in Hybrid Electric Vehicle (PHEV)": 0
+})
+
+num_features_q3 = ["model_year", "base_msrp", "electric_range"]
+cat_features_q3 = ["county", "state", "cafv_eligibility", "make", "electric_utility"]
+
+preprocessor_q3 = ColumnTransformer(
+    transformers=[
+        ("num", StandardScaler(), num_features_q3),
+        ("cat", OneHotEncoder(handle_unknown="ignore"), cat_features_q3),
+    ]
+)
+
+X_train_q3, X_test_q3, y_train_q3, y_test_q3 = train_test_split(
+    X_q3, y_q3, test_size=0.2, random_state=42, stratify=y_q3
+)
+
+# ----- Logistic Regression -----
+log_reg_q3 = Pipeline(steps=[
+    ("preprocess", preprocessor_q3),
+    ("model", LogisticRegression(max_iter=1000))
+])
+
+log_reg_q3.fit(X_train_q3, y_train_q3)
+y_pred_log_q3 = log_reg_q3.predict(X_test_q3)
+y_prob_log_q3 = log_reg_q3.predict_proba(X_test_q3)[:, 1]
+
+print("\nQ3 – Logistic Regression")
+print("Accuracy:", accuracy_score(y_test_q3, y_pred_log_q3))
+print("Precision:", precision_score(y_test_q3, y_pred_log_q3))
+print("Recall:", recall_score(y_test_q3, y_pred_log_q3))
+print("F1:", f1_score(y_test_q3, y_pred_log_q3))
+print("ROC-AUC:", roc_auc_score(y_test_q3, y_prob_log_q3))
+
+# ----- Random Forest Classifier -----
+rf_clf_q3 = Pipeline(steps=[
+    ("preprocess", preprocessor_q3),
+    ("model", RandomForestClassifier(
+        n_estimators=200, max_depth=None, random_state=42, n_jobs=-1
+    ))
+])
+
+rf_clf_q3.fit(X_train_q3, y_train_q3)
+y_pred_rf_q3 = rf_clf_q3.predict(X_test_q3)
+y_prob_rf_q3 = rf_clf_q3.predict_proba(X_test_q3)[:, 1]
+
+print("\nQ3 – Random Forest Classifier")
+print("Accuracy:", accuracy_score(y_test_q3, y_pred_rf_q3))
+print("Precision:", precision_score(y_test_q3, y_pred_rf_q3))
+print("Recall:", recall_score(y_test_q3, y_pred_rf_q3))
+print("F1:", f1_score(y_test_q3, y_pred_rf_q3))
+print("ROC-AUC:", roc_auc_score(y_test_q3, y_prob_rf_q3))
+
+# ----- Bar Chart of Metrics -----
+metrics_q3 = pd.DataFrame({
+    "Model": ["Logistic Regression", "Random Forest"],
+    "Accuracy": [
+        accuracy_score(y_test_q3, y_pred_log_q3),
+        accuracy_score(y_test_q3, y_pred_rf_q3)
+    ],
+    "Precision": [
+        precision_score(y_test_q3, y_pred_log_q3),
+        precision_score(y_test_q3, y_pred_rf_q3)
+    ],
+    "Recall": [
+        recall_score(y_test_q3, y_pred_log_q3),
+        recall_score(y_test_q3, y_pred_rf_q3)
+    ],
+    "F1": [
+        f1_score(y_test_q3, y_pred_log_q3),
+        f1_score(y_test_q3, y_pred_rf_q3)
+    ]
+})
+
+metrics_q3_melt = metrics_q3.melt(id_vars="Model", var_name="Metric", value_name="Score")
+
+plt.figure(figsize=(8, 6))
+sns.barplot(data=metrics_q3_melt, x="Metric", y="Score", hue="Model")
+plt.title("Q3 – Classification Metrics: Logistic Regression vs Random Forest")
+plt.ylim(0, 1)
+plt.tight_layout()
+plt.show()
+
+# =========================
+# 5. Question 4 – Predicting Base MSRP (Regression)
+# =========================
+# Target: base_msrp
+# Predictors: model_year, electric_range, geographic variables (county/state),
+#             cafv_eligibility, manufacturer (make)
+# Electric utility used later for residual grouping
+
+q4_cols = [
+    "base_msrp", "model_year", "electric_range",
+    "county", "state", "cafv_eligibility", "make", "electric_utility"
+]
+q4_df = df[q4_cols].copy()
+q4_df = q4_df.dropna(subset=q4_cols)
+q4_df = q4_df[q4_df["base_msrp"] > 0]
+q4_df = q4_df[q4_df["electric_range"] > 0]
+
+X_q4 = q4_df.drop("base_msrp", axis=1)
+y_q4 = q4_df["base_msrp"]
+
+num_features_q4 = ["model_year", "electric_range"]
+cat_features_q4 = ["county", "state", "cafv_eligibility", "make", "electric_utility"]
+
+preprocessor_q4 = ColumnTransformer(
+    transformers=[
+        ("num", StandardScaler(), num_features_q4),
+        ("cat", OneHotEncoder(handle_unknown="ignore"), cat_features_q4),
+    ]
+)
+
+X_train_q4, X_test_q4, y_train_q4, y_test_q4 = train_test_split(
+    X_q4, y_q4, test_size=0.2, random_state=42
+)
+
+# ----- Baseline Linear Regression -----
+linreg_q4 = Pipeline(steps=[
+    ("preprocess", preprocessor_q4),
+    ("model", LinearRegression())
+])
+
+linreg_q4.fit(X_train_q4, y_train_q4)
+y_pred_lin_q4 = linreg_q4.predict(X_test_q4)
+
+rmse_lin_q4 = mean_squared_error(y_test_q4, y_pred_lin_q4, squared=False)
+mae_lin_q4 = mean_absolute_error(y_test_q4, y_pred_lin_q4)
+r2_lin_q4 = r2_score(y_test_q4, y_pred_lin_q4)
+
+print("\nQ4 – Linear Regression")
+print("RMSE:", rmse_lin_q4)
+print("MAE:", mae_lin_q4)
+print("R²:", r2_lin_q4)
+
+# ----- Random Forest Regressor -----
+rf_reg_q4 = Pipeline(steps=[
+    ("preprocess", preprocessor_q4),
+    ("model", RandomForestRegressor(
+        n_estimators=200, max_depth=None, random_state=42, n_jobs=-1
+    ))
+])
+
+rf_reg_q4.fit(X_train_q4, y_train_q4)
+y_pred_rf_q4 = rf_reg_q4.predict(X_test_q4)
+
+rmse_rf_q4 = mean_squared_error(y_test_q4, y_pred_rf_q4, squared=False)
+mae_rf_q4 = mean_absolute_error(y_test_q4, y_pred_rf_q4)
+r2_rf_q4 = r2_score(y_test_q4, y_pred_rf_q4)
+
+print("\nQ4 – Random Forest Regressor")
+print("RMSE:", rmse_rf_q4)
+print("MAE:", mae_rf_q4)
+print("R²:", r2_rf_q4)
+
+# ----- Predicted vs Actual Scatter (for RF) -----
+plt.figure(figsize=(8, 6))
+sns.scatterplot(x=y_test_q4, y=y_pred_rf_q4, alpha=0.4)
+max_val = max(y_test_q4.max(), y_pred_rf_q4.max())
+min_val = min(y_test_q4.min(), y_pred_rf_q4.min())
+plt.plot([min_val, max_val], [min_val, max_val], "k--", linewidth=2)
+plt.title("Q4 – Predicted vs Actual Base MSRP (Random Forest)")
+plt.xlabel("Actual Base MSRP")
+plt.ylabel("Predicted Base MSRP")
+plt.tight_layout()
+plt.show()
+
+# ----- Residual Analysis by County and Electric Utility -----
+residuals_q4 = y_test_q4 - y_pred_rf_q4
+residuals_df_q4 = X_test_q4.copy()
+residuals_df_q4["actual_base_msrp"] = y_test_q4
+residuals_df_q4["pred_base_msrp"] = y_pred_rf_q4
+residuals_df_q4["residual"] = residuals_q4
+
+# Boxplot of residuals by county
+plt.figure(figsize=(10, 6))
+top_counties = residuals_df_q4["county"].value_counts().head(10).index
+sns.boxplot(
+    data=residuals_df_q4[residuals_df_q4["county"].isin(top_counties)],
+    x="county", y="residual"
+)
+plt.title("Q4 – Residuals by County (Top 10 by Count)")
+plt.xticks(rotation=90)
+plt.xlabel("County")
+plt.ylabel("Residual (Actual - Predicted)")
+plt.tight_layout()
+plt.show()
+
+# Boxplot of residuals by electric utility
+plt.figure(figsize=(10, 6))
+top_utils = residuals_df_q4["electric_utility"].value_counts().head(10).index
+sns.boxplot(
+    data=residuals_df_q4[residuals_df_q4["electric_utility"].isin(top_utils)],
+    x="electric_utility", y="residual"
+)
+plt.title("Q4 – Residuals by Electric Utility (Top 10 by Count)")
+plt.xticks(rotation=90)
+plt.xlabel("Electric Utility")
+plt.ylabel("Residual (Actual - Predicted)")
+plt.tight_layout()
+plt.show()
+
+# =========================
+# End of Analysis Code
+# =========================
